@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Site Checker</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>Site Checker</h1>
+        <p class="subtitle">Проверка домена, DNS, серверов, SSL и работоспособности сайта</p>
+
+        <form method="post" action="{{ url_for('check') }}" class="check-form">
+            <input type="text" name="domain" placeholder="Введите домен, например example.com"
+                   value="{{ domain or '' }}" autofocus>
+            <button type="submit">Проверить</button>
+        </form>
+
+        {% if error %}
+            <div class="error">{{ error }}</div>
+        {% endif %}
+
+        {% if report %}
+            <h2 class="domain-title">{{ report.domain }}</h2>
+
+            {% set s = report.summary %}
+            <section class="summary {{ s.verdict.status }}">
+                <div class="verdict">
+                    <span class="verdict-label">{{ s.verdict.label }}</span>
+                    <span class="verdict-hint">{{ s.verdict.hint }}</span>
+                </div>
+                <div class="counts">
+                    <span class="cnt ok">OK {{ s.counts.ok }}</span>
+                    <span class="cnt warn">Внимание {{ s.counts.warn }}</span>
+                    <span class="cnt bad">Проблемы {{ s.counts.bad }}</span>
+                    <span class="cnt info">Инфо {{ s.counts.info }}</span>
+                </div>
+                <ul class="issues">
+                    {% for i in s.issues %}
+                    <li class="issue {{ i.status }}">
+                        <span class="mark">{{ i.title }}</span>
+                        <span class="detail">{{ i.detail }}</span>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </section>
+
+            {% if report.ns_check.list_ok and report.ns_check.servers %}
+                <section>
+                    <h3>NS-серверы и их проверка</h3>
+                    <table>
+                        <thead>
+                            <tr><th>Сервер</th><th>IP-адрес(а)</th><th>Отвечает</th><th>Время ответа</th></tr>
+                        </thead>
+                        <tbody>
+                            {% for srv in report.ns_check.servers %}
+                            <tr>
+                                <td>{{ srv.name }}</td>
+                                <td>
+                                    {% if srv.ips %}{{ srv.ips | join('<br>') | safe }}{% else %}<span class="bad">нет IP</span>{% endif %}
+                                </td>
+                                <td>
+                                    {% if srv.answers_ok %}<span class="ok">да</span>
+                                    {% elif srv.ips_ok %}<span class="bad">нет</span>
+                                    {% else %}<span class="warn">—</span>{% endif %}
+                                </td>
+                                <td>{% if srv.latency_ms is not none %}{{ srv.latency_ms }} мс{% else %}—{% endif %}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </section>
+            {% else %}
+                <div class="error">Не удалось определить NS-серверы: {{ report.ns_check.error }}</div>
+            {% endif %}
+
+            <section>
+                <h3>Записи домена</h3>
+                <table>
+                    <thead><tr><th>Тип</th><th>Значение</th><th>TTL</th></tr></thead>
+                    <tbody>
+                        {% for rtype in ['A', 'AAAA', 'CNAME', 'MX', 'NS', 'TXT', 'SOA', 'CAA'] %}
+                            {% set item = report.records[rtype] %}
+                            {% if item.ok %}
+                                {% for rec in item.records %}
+                                <tr>
+                                    <td><span class="rtype">{{ rtype }}</span></td>
+                                    <td>
+                                        {% if rtype == 'MX' %}приоритет {{ rec.priority }} → <strong>{{ rec.value }}</strong>
+                                        {% elif rtype == 'TXT' %}<code>{{ rec.value }}</code>
+                                        {% elif rtype == 'SOA' %}<code>{{ rec.value }}</code>
+                                        {% else %}<strong>{{ rec.value }}</strong>{% endif %}
+                                    </td>
+                                    <td>{% if loop.first and item.ttl %}{{ item.ttl }} с{% else %}{% endif %}</td>
+                                </tr>
+                                {% endfor %}
+                            {% else %}
+                                <tr><td><span class="rtype">{{ rtype }}</span></td><td><span class="bad">{{ item.error }}</span></td><td></td></tr>
+                            {% endif %}
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </section>
+
+            <section>
+                <h3>Почта: SPF / DKIM / DMARC</h3>
+                <table>
+                    <thead><tr><th>Проверка</th><th>Значение</th></tr></thead>
+                    <tbody>
+                        {% for key, label in [('SPF', 'SPF'), ('DMARC', 'DMARC (_dmarc)'), ('DKIM', 'DKIM (default._domainkey)')] %}
+                            {% set item = report.mail_auth[key] %}
+                            <tr>
+                                <td><span class="rtype">{{ label }}</span></td>
+                                <td>
+                                    {% for rec in item.records %}
+                                        {% if (key == 'SPF' and 'v=spf1' in rec.value) or (key == 'DMARC' and 'v=DMARC1' in rec.value) or (key == 'DKIM' and 'v=DKIM1' in rec.value) %}
+                                            <code class="good-value">{{ rec.value }}</code>
+                                        {% else %}
+                                            <code>{{ rec.value }}</code>
+                                        {% endif %}
+                                    {% else %}<span class="bad">{{ item.error or 'Записи не найдены' }}</span>{% endfor %}
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </section>
+
+            <section>
+                <h3>HTTP / HTTPS</h3>
+                {% for c in report.http.checks %}
+                <div class="http-row {{ 'ok' if c.ok else 'bad' }}">
+                    <span class="scheme">{{ c.scheme|upper }}</span>
+                    <code>{{ c.url }}</code>
+                    {% if c.ok %}
+                        <span class="status">→ {{ c.status }} {{ c.reason }}</span>
+                        <span class="muted">за {{ c.time_ms }} мс · {{ c.size }} байт</span>
+                        {% if c.server %}<span class="muted">· сервер: <strong>{{ c.server }}</strong></span>{% endif %}
+                    {% else %}
+                        <span class="bad">{{ c.reason }}</span>
+                    {% endif %}
+                </div>
+                {% endfor %}
+                {% if report.http.final %}
+                    <p class="muted">Конечный URL: <code>{{ report.http.final.url }}</code></p>
+                {% endif %}
+            </section>
+
+            {% set sslc = report.ssl %}
+            <section>
+                <h3>SSL-сертификат</h3>
+                {% if sslc.has_ssl %}
+                    <table>
+                        <tbody>
+                            <tr><td>Статус</td><td>
+                                {% if sslc.status == 'ok' %}<span class="ok">Действителен</span>
+                                {% elif sslc.status == 'warn' %}<span class="warn">Истекает скоро!</span>
+                                {% else %}<span class="bad">Просрочен!</span>{% endif %}
+                                — осталось {{ sslc.days_left }} дн.
+                            </td></tr>
+                            <tr><td>Срок действия</td><td>{{ sslc.not_before }} → <strong>{{ sslc.not_after }}</strong></td></tr>
+                            <tr><td>Издатель</td><td>{{ sslc.issuer }}</td></tr>
+                            <tr><td>Владелец</td><td>{{ sslc.subject }}</td></tr>
+                            <tr><td>Домены (SANs)</td><td>
+                                {% for d in sslc.san %}<code>{{ d }}</code> {% else %}<span class="muted">нет</span>{% endfor %}
+                            </td></tr>
+                            <tr><td>TLS-версия</td><td>{{ sslc.tls_version }}</td></tr>
+                            <tr><td>Длина цепочки</td><td>{{ sslc.chain_len }} серт.</td></tr>
+                        </tbody>
+                    </table>
+                {% else %}
+                    <div class="error">{{ sslc.error }}</div>
+                {% endif %}
+            </section>
+
+            <section>
+                <h3>Пинг</h3>
+                {% if report.ping.ok %}
+                    <span class="ok">доступен</span> — {{ report.ping.detail }} ; {{ report.ping.time_ms }} мс
+                {% else %}
+                    <span class="bad">{{ report.ping.reason }}</span>
+                {% endif %}
+            </section>
+
+            <section>
+                <h3>Порты</h3>
+                <p class="muted">Открыто портов: <strong>{{ report.ports.open_count }}</strong> из {{ report.ports.results|length }}</p>
+                <table>
+                    <thead><tr><th>Порт</th><th>Сервис</th><th>Состояние</th><th>Время</th></tr></thead>
+                    <tbody>
+                        {% for p in report.ports.results %}
+                        <tr>
+                            <td><span class="rtype">{{ p.port }}</span></td>
+                            <td>{{ p.name }}</td>
+                            <td>
+                                {% if p.state == 'open' %}<span class="ok">открыт</span>
+                                {% else %}<span class="muted">{{ p.detail }}</span>{% endif %}
+                            </td>
+                            <td>{% if p.time_ms is not none %}{{ p.time_ms }} мс{% endif %}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </section>
+
+            {% if report.whois.ok and report.whois.records %}
+                <section>
+                    <h3>WHOIS</h3>
+                    <table>
+                        <thead><tr><th>Поле</th><th>Значение</th></tr></thead>
+                        <tbody>
+                            {% for rec in report.whois.records %}
+                            <tr><td>{{ rec.key }}</td><td>{{ rec.value }}</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </section>
+            {% elif report.whois.error %}
+                <section>
+                    <h3>WHOIS</h3>
+                    <div class="error">{{ report.whois.error }}</div>
+                </section>
+            {% endif %}
+        {% endif %}
+    </div>
+</body>
+</html>
